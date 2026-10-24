@@ -1,0 +1,90 @@
+name: Sync and build CustomRunelite
+
+on:
+  schedule:
+    - cron: '17,47 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: custom-runelite-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync-and-build:
+    if: github.repository == 'BScriptz/CustomRunelite'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      GRADLE_OPTS: '-Dfile:encoding=UTF-8'
+    steps:
+      - name: Check out maintained branch
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+
+      - name: Merge official RuneLite updates
+        id: upstream
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add upstream https://github.com/runelite/runelite.git
+          git fetch --no-tags upstream master
+          if git merge-base --is-ancestor upstream/master HEAD; then
+            if [ "$EVENT_NAME" = 'workflow_dispatch' ]; then
+              echo 'build=true' >> "$GITHUB_OUTPUT"
+            else
+              echo 'build=false' >> "$GITHUB_OUTPUT"
+            fi
+          else
+            git merge --no-edit upstream/master
+            echo 'build=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up JDK 11
+        if: steps.upstream.outputs.build == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+
+      - name: Set up Gradle
+        if: steps.upstream.outputs.build == 'true'
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Cache shader compiler
+        if: steps.upstream.outputs.build == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/runelite
+          key: ${{ runner.os }}-custom-glslang-${{ hashFiles('ci/build.sh') }}
+
+      - name: Run official build and tests
+        if: steps.upstream.outputs.build == 'true'
+        run: bash ci/build.sh
+
+      - name: Record source revision
+        if: steps.upstream.outputs.build == 'true'
+        run: git rev-parse HEAD > runelite-client/build/libs/source-commit.txt
+
+      - name: Save compiled client
+        if: steps.upstream.outputs.build == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: CustomRunelite-${{ github.run_number }}
+          path: |
+            runelite-client/build/libs/client-*-shaded.jar
+            runelite-client/build/libs/source-commit.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish verified upstream merge
+        if: steps.upstream.outputs.build == 'true'
+        run: git push origin HEAD:master
